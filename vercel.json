@@ -1,0 +1,17 @@
+{
+  "functions": {
+    "api/index.js": {
+      "runtime": "nodejs18.x"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.js"
+    }
+  ],
+  "env": {
+    "POSTGRES_URL": "@postgres_url",
+    "JWT_SECRET": "@jwt_secret"
+  }
+}

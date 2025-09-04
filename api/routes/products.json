@@ -1,0 +1,36 @@
+import express from 'express';
+import pool from '../db.js';
+import { authenticateToken } from '../middleware/auth.js';
+
+const router = express.Router();
+
+// Get all products grouped by operator and category
+router.get('/', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM products ORDER BY operator, category, name');
+    
+    const groupedProducts = {};
+    result.rows.forEach(product => {
+      if (!groupedProducts[product.operator]) {
+        groupedProducts[product.operator] = {};
+      }
+      if (!groupedProducts[product.operator][product.category]) {
+        groupedProducts[product.operator][product.category] = [];
+      }
+      
+      groupedProducts[product.operator][product.category].push({
+        id: product.id,
+        name: product.name,
+        price_mmk: product.price_mmk,
+        extra: product.extra
+      });
+    });
+
+    res.json(groupedProducts);
+  } catch (error) {
+    console.error('Get products error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+export default router;

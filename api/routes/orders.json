@@ -1,0 +1,209 @@
+import express from 'express';
+import pool from '../db.js';
+import { authenticateToken, requireAdmin } from '../middleware/auth.js';
+
+const router = express.Router();
+
+// Get user's orders
+router.get('/', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC',
+      [req.user.id]
+    );
+
+    const orders = result.rows.map(order => ({
+      id: order.id,
+      userId: order.user_id,
+      type: order.order_type === 'CREDIT' ? 'CREDIT' : undefined,
+      product: {
+        name: order.product_name,
+        operator: order.operator
+      },
+      cost: parseFloat(order.cost),
+      status: order.status,
+      date: order.created_at,
+      deliveryInfo: order.delivery_info,
+      paymentMethod: order.payment_method,
+      paymentProof: order.payment_proof,
+      actionBy: order.action_by
+    }));
+
+    res.json(orders);
+  } catch (error) {
+    console.error('Get orders error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Create product order
+router.post('/product', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+
+    const { productId, deliveryInfo } = req.body;
+
+    // Get product details
+    const productResult = await client.query('SELECT * FROM products WHERE id = $1', [productId]);
+    const product = productResult.rows[0];
+
+    if (!product) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const creditCost = product.price_mmk / 100; // MMK_PER_CREDIT = 100
+
+    // Check user has enough credits
+    if (req.user.credits < creditCost) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Insufficient credits' });
+    }
+
+    // Deduct credits
+    await client.query(
+      'UPDATE users SET credits = credits - $1 WHERE id = $2',
+      [creditCost, req.user.id]
+    );
+
+    // Create order
+    const orderId = `PROD-${new Date().toISOString().slice(2,10).replace(/-/g,'')}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+    
+    await client.query(
+      'INSERT INTO orders (id, user_id, product_id, product_name, operator, cost, delivery_info, order_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+      [orderId, req.user.id, productId, product.name, product.operator, creditCost, deliveryInfo, 'PRODUCT']
+    );
+
+    await client.query('COMMIT');
+
+    res.json({ success: true, orderId });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Create product order error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// Create credit order
+router.post('/credit', authenticateToken, async (req, res) => {
+  try {
+    const { amount, paymentMethod, paymentProof } = req.body;
+
+    const orderId = `CRD-${new Date().toISOString().slice(2,10).replace(/-/g,'')}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+    
+    await pool.query(
+      'INSERT INTO orders (id, user_id, product_name, cost, payment_method, payment_proof, order_type) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      [orderId, req.user.id, `${(amount / 100).toFixed(2)} Credits Purchase`, amount, paymentMethod, paymentProof, 'CREDIT']
+    );
+
+    res.json({ success: true, orderId });
+  } catch (error) {
+    console.error('Create credit order error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Admin: Get all orders
+router.get('/admin/all', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT o.*, u.username 
+      FROM orders o 
+      JOIN users u ON o.user_id = u.id 
+      ORDER BY o.created_at DESC
+    `);
+
+    const orders = result.rows.map(order => ({
+      id: order.id,
+      userId: order.user_id,
+      username: order.username,
+      type: order.order_type === 'CREDIT' ? 'CREDIT' : undefined,
+      product: {
+        name: order.product_name,
+        operator: order.operator
+      },
+      cost: parseFloat(order.cost),
+      status: order.status,
+      date: order.created_at,
+      deliveryInfo: order.delivery_info,
+      paymentMethod: order.payment_method,
+      paymentProof: order.payment_proof,
+      actionBy: order.action_by
+    }));
+
+    res.json(orders);
+  } catch (error) {
+    console.error('Get admin orders error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Admin: Update order status
+router.patch('/admin/:orderId', authenticateToken, requireAdmin, async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+
+    const { orderId } = req.params;
+    const { status } = req.body;
+
+    const orderResult = await client.query('SELECT * FROM orders WHERE id = $1', [orderId]);
+    const order = orderResult.rows[0];
+
+    if (!order) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    // Update order status
+    await client.query(
+      'UPDATE orders SET status = $1, action_by = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3',
+      [status, req.user.username, orderId]
+    );
+
+    // If approving a credit order, add credits to user
+    if (status === 'Completed' && order.order_type === 'CREDIT') {
+      const creditsToAdd = order.cost / 100; // Convert MMK to credits
+      await client.query(
+        'UPDATE users SET credits = credits + $1 WHERE id = $2',
+        [creditsToAdd, order.user_id]
+      );
+
+      // Add notification
+      await client.query(
+        'INSERT INTO notifications (user_id, message) VALUES ($1, $2)',
+        [order.user_id, `Your credit purchase of ${creditsToAdd.toFixed(2)} credits has been approved!`]
+      );
+    }
+
+    // If declining a product order, refund credits
+    if (status === 'Declined' && order.order_type === 'PRODUCT') {
+      await client.query(
+        'UPDATE users SET credits = credits + $1 WHERE id = $2',
+        [order.cost, order.user_id]
+      );
+
+      // Add notification
+      await client.query(
+        'INSERT INTO notifications (user_id, message) VALUES ($1, $2)',
+        [order.user_id, `Your order has been declined and ${order.cost} credits have been refunded.`]
+      );
+    }
+
+    await client.query('COMMIT');
+    res.json({ success: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Update order status error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+});
+
+export default router;

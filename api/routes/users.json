@@ -1,0 +1,65 @@
+import express from 'express';
+import pool from '../db.js';
+import { authenticateToken, requireAdmin } from '../middleware/auth.js';
+
+const router = express.Router();
+
+// Get current user info
+router.get('/me', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    const user = result.rows[0];
+
+    res.json({
+      id: user.id,
+      username: user.username,
+      isAdmin: user.is_admin,
+      credits: parseFloat(user.credits),
+      securityAmount: user.security_amount,
+      banned: user.banned
+    });
+  } catch (error) {
+    console.error('Get user info error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get user notifications
+router.get('/notifications', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC',
+      [req.user.id]
+    );
+
+    const notifications = result.rows.map(n => n.message);
+    res.json(notifications);
+  } catch (error) {
+    console.error('Get notifications error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Admin: Get all users
+router.get('/admin/all', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM users ORDER BY created_at DESC');
+    
+    const users = result.rows.map(user => ({
+      id: user.id,
+      username: user.username,
+      isAdmin: user.is_admin,
+      credits: parseFloat(user.credits),
+      securityAmount: user.security_amount,
+      banned: user.banned,
+      notifications: [] // We'll load these separately if needed
+    }));
+
+    res.json(users);
+  } catch (error) {
+    console.error('Get admin users error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+export default router;

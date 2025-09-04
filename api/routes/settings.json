@@ -1,0 +1,44 @@
+import express from 'express';
+import pool from '../db.js';
+import { authenticateToken, requireAdmin } from '../middleware/auth.js';
+
+const router = express.Router();
+
+// Get payment accounts
+router.get('/payment-accounts', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM payment_accounts');
+    
+    const accounts = {};
+    result.rows.forEach(account => {
+      accounts[account.method] = {
+        name: account.account_name,
+        number: account.account_number
+      };
+    });
+
+    res.json(accounts);
+  } catch (error) {
+    console.error('Get payment accounts error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get FAQs
+router.get('/faqs', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM faqs ORDER BY display_order, id');
+    
+    const faqs = result.rows.map(faq => ({
+      q: faq.question,
+      a: faq.answer
+    }));
+
+    res.json(faqs);
+  } catch (error) {
+    console.error('Get FAQs error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+export default router;
